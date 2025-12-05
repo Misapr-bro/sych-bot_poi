@@ -1,0 +1,15 @@
+# Зависимости
+node_modules/
+
+# Переменные окружения (ТУТ ТВОИ КЛЮЧИ)
+.env
+
+# Данные бота (ТУТ ПЕРЕПИСКИ И ПРОФИЛИ)
+data/
+db.json
+profiles.json
+skipLeftData.json
+instructions.json
+
+# Системные файлы
+.DS_Store
