@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  sych-bot:
+    build: .
+    container_name: sych-bot
+    restart: unless-stopped
+    # Монтируем папку data, чтобы "память" бота не стерлась при перезагрузке
+    volumes:
+      - ./data:/app/data
+      - /root/n8n/obsidian_vault/MyVault_/Inbox:/app/obsidian_inbox
+    # Подключаем файл с секретами
+    env_file:
+      - .env
+    # Лимиты ресурсов (хорошая практика для стабильности сервера)
+    deploy:
+      resources:
+        limits:
+          memory: 512M

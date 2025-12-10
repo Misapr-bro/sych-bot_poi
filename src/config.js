@@ -22,7 +22,9 @@ module.exports = {
   
   modelName: 'gemini-2.5-flash',
   contextSize: 30,
-  triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
+  // БЫЛО: triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
+  // СТАЛО:
+  triggerRegex: /(?<![а-яёa-z])(анна|anna)(?![а-яёa-z])/i,
 
 };
 
