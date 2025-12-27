@@ -203,10 +203,11 @@ async function processMessage(bot, msg) {
 
                 if (transcription) {
                     log("VOICE", "Транскрипция успешна: " + transcription.text.substring(0,30));
-                    text = transcription.text; 
+                    text = transcription.text;
                     msg.text = transcription.text;
 
-                    await bot.sendMessage(chatId, "🎤 **Расшифровка:**\n_" + transcription.text + "_", getReplyOptions(msg));
+                    // Отправляем без Markdown formatting, чтобы избежать проблем с спецсимволами
+                    await bot.sendMessage(chatId, "🎤 Расшифровка:\n" + transcription.text, { disable_web_page_preview: true });
                 }
             } catch (e) { 
                 log("VOICE ERROR", e.message);
@@ -258,6 +259,132 @@ async function processMessage(bot, msg) {
 
         if (storage.isTopicMuted(chatId, threadId)) return;
 
+        // === 5.5. ПЕРЕСЛАННЫЕ СООБЩЕНИЯ (автосохранение) ===
+        if (msg.forward_from || msg.forward_from_chat || msg.forward_date) {
+            log("FORWARD", "Обнаружено пересланное сообщение");
+
+            // Получаем данные об оригинальном отправителе
+            let originalSender = "Unknown";
+            let originalUsername = null;
+
+            if (msg.forward_from) {
+                // Переслано от пользователя
+                originalSender = msg.forward_from.first_name || msg.forward_from.username || "Unknown";
+                originalUsername = msg.forward_from.username;
+            } else if (msg.forward_from_chat) {
+                // Переслано из канала/группы
+                originalSender = msg.forward_from_chat.title || "Channel";
+                originalUsername = msg.forward_from_chat.username;
+            }
+
+            // Сохраняем в Obsidian
+            try {
+                const title = parser.saveForwardedMessage(
+                    text || "[Без текста]",
+                    originalSender,
+                    originalUsername,
+                    msg.chat.title || "Telegram",
+                    msg.message_id,
+                    chatId
+                );
+
+                log("FORWARD", "Сохранено: " + title);
+
+                // Отправляем подтверждение
+                await bot.sendMessage(chatId,
+                    "💾 **Пересланное сообщение сохранено!**\n\n📄 **Заголовок:** " + title + "\n📂 **Папка:** Obsidian Inbox",
+                    { disable_web_page_preview: true }
+                );
+                return; // Прерываем обработку, чтобы не отправлять в AI
+            } catch (e) {
+                log("FORWARD ERROR", e.message);
+                // Если не сохранилось, продолжаем обычную обработку
+            }
+        }
+
+        // === 5.6. КОМАНДА /SAVE (сохранить любое сообщение) ===
+        if (command === '/save') {
+            log("CMD", "Сохранение сообщения (/save)");
+
+            // Если это реплай на сообщение - сохраняем его
+            if (msg.reply_to_message && msg.reply_to_message.text) {
+                const replyMsg = msg.reply_to_message;
+                const sender = replyMsg.from ? (replyMsg.from.first_name || replyMsg.from.username || "Unknown") : "Unknown";
+                const username = replyMsg.from ? replyMsg.from.username : null;
+
+                try {
+                    const title = parser.saveForwardedMessage(
+                        replyMsg.text,
+                        sender,
+                        username,
+                        msg.chat.title || "Telegram",
+                        replyMsg.message_id,
+                        chatId
+                    );
+
+                    log("CMD", "Сохранено: " + title);
+                    return bot.sendMessage(chatId, "💾 Сохранено: " + title, getBaseOptions(threadId));
+                } catch (e) {
+                    log("CMD ERROR", e.message);
+                    return bot.sendMessage(chatId, "⚠️ Не удалось сохранить: " + e.message, getBaseOptions(threadId));
+                }
+            } else {
+                // Сохраняем текущее сообщение
+                try {
+                    const title = parser.saveForwardedMessage(
+                        text,
+                        senderName,
+                        msg.from.username,
+                        msg.chat.title || "Telegram",
+                        msg.message_id,
+                        chatId
+                    );
+
+                    log("CMD", "Сохранено: " + title);
+                    return bot.sendMessage(chatId, "💾 Сохранено: " + title, getBaseOptions(threadId));
+                } catch (e) {
+                    log("CMD ERROR", e.message);
+                    return bot.sendMessage(chatId, "⚠️ Не удалось сохранить: " + e.message, getBaseOptions(threadId));
+                }
+            }
+        }
+
+        // === 5.7. КОМАНДА /HELP (справка) ===
+        if (command === '/help' || command === '/start') {
+            log("CMD", "Показ справки (/help)");
+            const helpText = `🤖 **Команды Анны:**
+
+📋 **Основные команды:**
+/start — Эта справка
+/reset — Сбросить контекст диалога
+/mute — Включить/выключить режим тишины
+/save — Сохранить сообщение в Obsidian
+
+🔗 **Работа с ссылками:**
+• Отправь ссылку — я сохраню статью в Obsidian
+• YouTube ссылка — скачаю субтитры и оформлю заметку
+• Пересланное сообщение — сохраню автоматически с метаданными
+
+💾 **Сохранение:**
+• Пересланные сообщения сохраняются автоматически
+• Команда /save сохранит любое сообщение
+• Реплай на сообщение + /save сохранит ответ на него
+
+📝 **Напоминания:**
+Напиши "напомни [текст]" или "напомни об этом завтра" — я поставлю напоминание.
+
+🎯 **Особенности:**
+• Помню контекст нашего разговора
+• Вижу фото, видео, документы (до 20 Мб)
+• Распознаю голосовые и перевожу в текст
+• Создаю психологический портрет (досье)
+
+---
+_Я — Анна, твой цифровой партнер. Общаемся искренне и тепло._`;
+
+            return bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        }
+
         // === НАЧАЛО ОБРАБОТКИ ОТВЕТА ===
         startTyping();
         addToHistory(chatId, senderName, text);
@@ -277,7 +404,7 @@ async function processMessage(bot, msg) {
                 
                 if (!data) {
                     stopTyping();
-                    await bot.sendMessage(chatId, "⚠️ У этого видео нет субтитров, я не могу его прочитать.", getReplyOptions(msg));
+                    await bot.sendMessage(chatId, "⚠️ У этого видео нет субтитров, я не могу его прочитать.", { disable_web_page_preview: true });
                     return;
                 }
 
@@ -295,17 +422,22 @@ async function processMessage(bot, msg) {
                 
                 stopTyping();
 
-                await bot.sendMessage(chatId, 
-                    "✅ **Видео обработано и сохранено!**\n\n📄 **Файл:** _" + savedFileName + "_\n🧠 **Что сделано:** Саммари + Полный текст.\n📂 **Папка:** Inbox", 
-                    getReplyOptions(msg)
+                // Отправляем без Markdown formatting, чтобы избежать проблем с спецсимволами в имени файла
+                await bot.sendMessage(chatId,
+                    "✅ Видео обработано и сохранено!\n\n📄 Файл: " + savedFileName + "\n🧠 Что сделано: Саммари + Полный текст.\n📂 Папка: Inbox",
+                    {
+                        reply_to_message_id: msg.message_id,
+                        disable_web_page_preview: true
+                    }
                 );
-                
+
                 return;
 
             } catch (e) {
                 console.error(e);
                 stopTyping();
-                await bot.sendMessage(chatId, "⚠️ Ошибка обработки видео: " + e.message);
+                // Отправляем без Markdown formatting, чтобы избежать ошибок
+                await bot.sendMessage(chatId, "⚠️ Ошибка обработки видео: " + e.message, { disable_web_page_preview: true });
             }
         }
 
@@ -321,20 +453,28 @@ async function processMessage(bot, msg) {
                 const title = await parser.saveArticle(url);
                 log("PARSER", "Статья сохранена: " + title);
                 stopTyping();
-                
-                await bot.sendMessage(chatId, 
-                    "✍️ **Добавила эту заметку тебе в блокнот.**\n\n📄 **Название:** _" + title + "_\n📂 **Статус:** ✅ Успешно", 
-                    getReplyOptions(msg)
+
+                // Отправляем без Markdown formatting, чтобы избежать проблем с спецсимволами в названии
+                await bot.sendMessage(chatId,
+                    "✍️ Добавила эту заметку тебе в блокнот.\n\n📄 Название: " + title + "\n📂 Статус: ✅ Успешно",
+                    {
+                        reply_to_message_id: msg.message_id,
+                        disable_web_page_preview: true
+                    }
                 );
-                
+
                 return;
 
             } catch (e) {
                 log("PARSER ERROR", e.message);
                 stopTyping();
-                await bot.sendMessage(chatId, 
-                    "⚠️ **Не удалось сохранить заметку.**\n\nЯ попыталась, но возникла ошибка: _" + e.message + "_\n\n_(Тем не менее, я могу обсудить эту статью, если хочешь)_",
-                    getReplyOptions(msg)
+                // Отправляем БЕЗ Markdown, чтобы избежать 400 ошибки из-за спецсимволов в e.message
+                await bot.sendMessage(chatId,
+                    "⚠️ Не удалось сохранить заметку.\n\nЯ попыталась, но возникла ошибка: " + e.message + "\n\n(Тем не менее, я могу обсудить эту статью, если хочешь)",
+                    {
+                        reply_to_message_id: msg.message_id,
+                        disable_web_page_preview: true
+                    }
                 );
             }
         }

@@ -13,17 +13,76 @@ function saveDirectContent(fileNameTitle, content) {
     // Чистим имя файла
     const safeTitle = (fileNameTitle || "Untitled").replace(/[\\/:*?"<>|]/g, '-').trim();
     const fileName = `${safeTitle}.md`;
-    
+
     if (!fs.existsSync(OBSIDIAN_PATH)) {
         fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
     }
 
     const fullPath = path.join(OBSIDIAN_PATH, fileName);
     fs.writeFileSync(fullPath, content);
-    
+
     console.log(`[FILE] Saved: ${fullPath}`);
     return fileName;
 }
+
+// [НОВАЯ ФУНКЦИЯ] Сохраняет пересланное сообщение или описание
+function saveForwardedMessage(messageText, senderName, senderUsername, chatName, messageId, chatId) {
+    const date = new Date().toISOString().split('T')[0];
+    const time = new Date().toLocaleTimeString('ru-RU');
+
+    // Формируем заголовок из первых 60 символов текста
+    let title = messageText.trim().substring(0, 60);
+    if (messageText.length > 60) title += '...';
+
+    // Чистим заголовок для имени файла
+    const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').trim();
+    const fileName = `${safeTitle}.md`;
+
+    // Формируем ссылку на сообщение (Telegram)
+    const username = senderUsername ? `@${senderUsername}` : senderName;
+    const telegramLink = chatId < 0
+        ? `https://t.me/c/${Math.abs(chatId)}/${messageId}` // Для групповых чатов
+        : `https://t.me/${senderUsername || 'c'}/${messageId}`; // Для личек (приблизительно)
+
+    // Формируем контент
+    const fileContent = `---
+title: "${title}"
+source: telegram
+date: ${date}
+time: ${time}
+tags: [inbox, forwarded, telegram]
+sender: "${username}"
+chat: "${chatName}"
+---
+
+# ${title}
+
+**От:** ${username}
+**Чат:** ${chatName}
+**Дата:** ${date} ${time}
+
+## Текст сообщения
+
+${messageText}
+
+---
+[🔗 Ссылка на сообщение](${telegramLink})
+
+*Сохранено Анной: ${new Date().toLocaleString('ru-RU')}*
+`;
+
+    // Сохраняем
+    if (!fs.existsSync(OBSIDIAN_PATH)) {
+        fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
+    }
+
+    const fullPath = path.join(OBSIDIAN_PATH, fileName);
+    fs.writeFileSync(fullPath, fileContent, 'utf-8');
+    console.log(`[FORWARD] Сохранено: ${fullPath}`);
+
+    return title; // Возвращаем заголовок для ответа
+}
+
 
 async function saveArticle(url) {
     try {
@@ -95,4 +154,4 @@ ${markdownBody}
     }
 }
 
-module.exports = { saveArticle, saveDirectContent };
+module.exports = { saveArticle, saveDirectContent, saveForwardedMessage };
