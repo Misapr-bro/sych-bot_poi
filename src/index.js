@@ -23,7 +23,7 @@ console.error = (...args) => originalError(getTimestamp(), ...args);
 // Создаем бота
 const bot = new TelegramBot(config.telegramToken, { polling: true });
 
-console.log("Сыч запущен и готов пояснять за жизнь.");
+console.log("Анна проснулась и готова к беседе.");
 console.log(`Admin ID: ${config.adminId}`);
 
 // === ТИКЕР НАПОМИНАЛОК (Проверка каждую минуту) ===

@@ -11,5 +11,24 @@ profiles.json
 skipLeftData.json
 instructions.json
 
+__pycache__/
+*.py[cod]
+*$py.class
+ *.so
+.Python
+ env/
+ venv/
+ENV/
+.ENV
+.env
+*.log
+.pytest_cache/
+.DS_Store
+*.db
+*.db-journal
+config.py
+EOF
+
+
 # Системные файлы
 .DS_Store

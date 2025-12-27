@@ -6,7 +6,12 @@ WORKDIR /app
 
 # Устанавливаем системные зависимости (для ffmpeg, если бот работает с голосовыми/видео)
 # В README указана работа с голосовыми, поэтому ffmpeg нужен обязательно
-RUN apk add --no-cache ffmpeg python3 make g++
+# Было примерно так:
+# RUN apk add --no-cache ffmpeg python3 make g++
+
+# Стало (добавляем py3-pip и ставим yt-dlp):
+RUN apk add --no-cache ffmpeg python3 py3-pip make g++ && \
+    pip install yt-dlp --break-system-packages youtube-transcript-api
 
 # Копируем файлы зависимостей
 COPY package*.json ./

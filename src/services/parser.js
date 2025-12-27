@@ -8,6 +8,23 @@ const axios = require('axios');
 // Путь, куда мы смонтировали папку в docker-compose
 const OBSIDIAN_PATH = '/app/obsidian_inbox';
 
+// [НОВАЯ ФУНКЦИЯ] Сохраняет готовый текст (например, от AI)
+function saveDirectContent(fileNameTitle, content) {
+    // Чистим имя файла
+    const safeTitle = (fileNameTitle || "Untitled").replace(/[\\/:*?"<>|]/g, '-').trim();
+    const fileName = `${safeTitle}.md`;
+    
+    if (!fs.existsSync(OBSIDIAN_PATH)) {
+        fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
+    }
+
+    const fullPath = path.join(OBSIDIAN_PATH, fileName);
+    fs.writeFileSync(fullPath, content);
+    
+    console.log(`[FILE] Saved: ${fullPath}`);
+    return fileName;
+}
+
 async function saveArticle(url) {
     try {
         console.log(`[PARSER] Качаю статью: ${url}`);
@@ -78,4 +95,4 @@ ${markdownBody}
     }
 }
 
-module.exports = { saveArticle };
+module.exports = { saveArticle, saveDirectContent };
