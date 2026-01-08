@@ -4,153 +4,235 @@ const TurndownService = require("turndown");
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// Путь, куда мы смонтировали папку в docker-compose
+// ============================================================
+// БЛОК 1: КОНФИГУРАЦИЯ И КОНСТАНТЫ
+// ============================================================
+
+// Путь к папке Obsidian в Docker-контейнере
 const OBSIDIAN_PATH = '/app/obsidian_inbox';
 
-// [НОВАЯ ФУНКЦИЯ] Сохраняет готовый текст (например, от AI)
-function saveDirectContent(fileNameTitle, content) {
-    // Чистим имя файла
-    const safeTitle = (fileNameTitle || "Untitled").replace(/[\\/:*?"<>|]/g, '-').trim();
-    const fileName = `${safeTitle}.md`;
+// Инициализация AI для перевода статей (если ключ есть)
+const genAI = process.env.GOOGLE_API_KEY ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY) : null;
+const MODEL_CONFIG = { model: "gemini-2.0-flash", timeout: 600000 };
 
+// ============================================================
+// БЛОК 2: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (УТИЛИТЫ)
+// ============================================================
+
+/**
+ * Подблок: Безопасное имя файла.
+ * Чистит строку от запрещенных символов и обрезает длину до лимитов ФС.
+ */
+function sanitizeFilename(text) {
+    if (!text) return `untitled_${Date.now()}.md`;
+
+    // 1. Убираем запрещенные символы (/:*?"<>| и переносы)
+    let clean = text.replace(/[\\/:*?"<>|\n\r]/g, '-');
+    // 2. Убираем лишние пробелы
+    clean = clean.replace(/\s+/g, " ").trim();
+    // 3. Обрезаем длину (60 симв = ~120 байт, запас для ext4 есть)
+    const MAX_LENGTH = 60;
+    
+    if (clean.length > MAX_LENGTH) {
+        clean = clean.substring(0, MAX_LENGTH).trim();
+    }
+    // Если после чистки пусто
+    if (!clean) clean = `note_${Date.now()}`;
+
+    return clean + ".md";
+}
+
+/**
+ * Подблок: AI-Обработка контента (Перевод и Саммари).
+ * Превращает сырой текст статьи в структурированный Markdown на русском.
+ */
+async function processContentWithAI(text, sourceUrl) {
+    if (!genAI) return null; // Если нет ключа, вернем null и сохраним "как есть"
+
+    const model = genAI.getGenerativeModel(MODEL_CONFIG);
+    const prompt = `
+    Ты — профессиональный технический редактор и переводчик.
+    Твоя задача — изучить текст статьи и сделать качественный конспект.
+
+    ЯЗЫКОВОЕ ПРАВИЛО (ВЫСШИЙ ПРИОРИТЕТ):
+    - Весь твой ответ должен быть СТРОГО НА РУССКОМ ЯЗЫКЕ.
+    - Если исходный текст на английском, немецком или ином языке — делай смысловой перевод.
+
+    СТРУКТУРА ОТВЕТА (Markdown):
+    TITLE: [Емкий заголовок на русском]
+
+    # [Заголовок статьи]
+    🔗 Источник: ${sourceUrl}
+
+    ## Краткая суть
+    [1-2 предложения]
+
+    ## Основной контент (Конспект)
+    [Пересказ ключевых идей, кода и выводов]
+    `;
+
+    try {
+        const result = await model.generateContent([prompt, text].join("\n\n---\n\n"));
+        const responseText = result.response.text();
+        
+        // Парсим ответ (вытаскиваем TITLE)
+        const lines = responseText.split('\n');
+        let title = "AI_Article";
+        const titleLine = lines.find(l => l.startsWith('TITLE:'));
+        
+        if (titleLine) {
+            title = titleLine.replace('TITLE:', '').trim();
+        }
+        
+        // Убираем строку TITLE из тела статьи
+        const body = lines.filter(l => !l.startsWith('TITLE:')).join('\n').trim();
+        
+        return { title, body };
+    } catch (e) {
+        console.warn("[PARSER] AI error, falling back to raw text:", e.message);
+        return null;
+    }
+}
+
+// ============================================================
+// БЛОК 3: ОСНОВНЫЕ ФУНКЦИИ СОХРАНЕНИЯ
+// ============================================================
+
+/**
+ * Подблок: Прямое сохранение (от видео-анализатора).
+ */
+function saveDirectContent(fileNameTitle, content) {
+    const fileName = sanitizeFilename(fileNameTitle);
+    
     if (!fs.existsSync(OBSIDIAN_PATH)) {
         fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
     }
 
     const fullPath = path.join(OBSIDIAN_PATH, fileName);
     fs.writeFileSync(fullPath, content);
-
     console.log(`[FILE] Saved: ${fullPath}`);
     return fileName;
 }
 
-// [НОВАЯ ФУНКЦИЯ] Сохраняет пересланное сообщение или описание
+/**
+ * Подблок: Сохранение пересланных сообщений Telegram.
+ * Создает frontmatter и сохраняет метаданные отправителя.
+ */
 function saveForwardedMessage(messageText, senderName, senderUsername, chatName, messageId, chatId) {
     const date = new Date().toISOString().split('T')[0];
     const time = new Date().toLocaleTimeString('ru-RU');
 
-    // Формируем заголовок из первых 60 символов текста
-    let title = messageText.trim().substring(0, 60);
-    if (messageText.length > 60) title += '...';
+    let fullTitle = messageText.trim().substring(0, 100);
+    if (messageText.length > 100) fullTitle += '...';
+    const safeYamlTitle = fullTitle.replace(/"/g, '\\"');
+    const fileName = sanitizeFilename(messageText);
 
-    // Чистим заголовок для имени файла
-    const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').trim();
-    const fileName = `${safeTitle}.md`;
-
-    // Формируем ссылку на сообщение (Telegram)
     const username = senderUsername ? `@${senderUsername}` : senderName;
     const telegramLink = chatId < 0
-        ? `https://t.me/c/${Math.abs(chatId)}/${messageId}` // Для групповых чатов
-        : `https://t.me/${senderUsername || 'c'}/${messageId}`; // Для личек (приблизительно)
+        ? `https://t.me/c/${Math.abs(chatId)}/${messageId}` 
+        : `https://t.me/${senderUsername || 'c'}/${messageId}`;
 
-    // Формируем контент
     const fileContent = `---
-title: "${title}"
+title: "${safeYamlTitle}"
 source: telegram
 date: ${date}
-time: ${time}
-tags: [inbox, forwarded, telegram]
 sender: "${username}"
 chat: "${chatName}"
+tags: [inbox, forwarded]
 ---
 
-# ${title}
+# ${fullTitle}
 
-**От:** ${username}
-**Чат:** ${chatName}
-**Дата:** ${date} ${time}
+**От:** ${username} | **Чат:** ${chatName} | **Время:** ${time}
 
 ## Текст сообщения
-
 ${messageText}
 
 ---
 [🔗 Ссылка на сообщение](${telegramLink})
-
-*Сохранено Анной: ${new Date().toLocaleString('ru-RU')}*
 `;
 
-    // Сохраняем
-    if (!fs.existsSync(OBSIDIAN_PATH)) {
-        fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
-    }
-
-    const fullPath = path.join(OBSIDIAN_PATH, fileName);
-    fs.writeFileSync(fullPath, fileContent, 'utf-8');
-    console.log(`[FORWARD] Сохранено: ${fullPath}`);
-
-    return title; // Возвращаем заголовок для ответа
+    if (!fs.existsSync(OBSIDIAN_PATH)) fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
+    fs.writeFileSync(path.join(OBSIDIAN_PATH, fileName), fileContent, 'utf-8');
+    console.log(`[FORWARD] Сохранено: ${fileName}`);
+    return fullTitle;
 }
 
-
+/**
+ * Подблок: Веб-клиппер (Статьи) с AI-переводом.
+ * 1. Качает HTML.
+ * 2. Чистит через Readability + Turndown.
+ * 3. Отправляет в AI для перевода и саммари (НОВОЕ).
+ */
 async function saveArticle(url) {
     try {
         console.log(`[PARSER] Качаю статью: ${url}`);
         
-        // 1. Скачиваем HTML (притворяемся обычным браузером)
+        // 1. Скачивание
         const response = await axios.get(url, {
             headers: { 
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
             },
-            timeout: 10000 
+            timeout: 15000 
         });
-        const html = response.data;
 
-        // 2. Выделяем основной текст (Readability)
-        const doc = new JSDOM(html, { url });
+        // 2. Парсинг структуры (Readability)
+        const doc = new JSDOM(response.data, { url });
         const reader = new Readability(doc.window.document);
         const article = reader.parse();
 
-        if (!article) throw new Error("Не удалось извлечь текст (защита от парсинга или пустая страница).");
+        if (!article) throw new Error("Не удалось извлечь текст (защита или пусто).");
 
-        // 3. Конвертируем в Markdown
-        const turndownService = new TurndownService({
-            headingStyle: 'atx',
-            codeBlockStyle: 'fenced'
-        });
-        // Настройка: убираем лишние скрипты и стили, если просочились
-        turndownService.remove(['script', 'style', 'iframe']);
+        // 3. Конвертация в сырой Markdown (Turndown)
+        const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+        turndownService.remove(['script', 'style', 'iframe', 'nav', 'footer']);
+        const rawMarkdown = turndownService.turndown(article.content);
 
-        const markdownBody = turndownService.turndown(article.content);
+        // 4. AI-Перевод и Структурирование (НОВОЕ)
+        let finalTitle = article.title;
+        let finalBody = rawMarkdown;
 
-        // 4. Формируем имя файла и контент
+        console.log(`[PARSER] Отправляю в AI для перевода...`);
+        const aiResult = await processContentWithAI(rawMarkdown.substring(0, 30000), url); // Лимит на вход 30к символов
+
+        if (aiResult) {
+            finalTitle = aiResult.title;
+            finalBody = aiResult.body;
+            console.log(`[PARSER] AI успешно обработал статью.`);
+        }
+
+        // 5. Сохранение файла
         const date = new Date().toISOString().split('T')[0];
-        // Чистим имя файла от запрещенных символов
-        const safeTitle = (article.title || "No Title").replace(/[\\/:*?"<>|]/g, '-').trim(); 
-        const fileName = `${safeTitle}.md`;
-        
+        const fileName = sanitizeFilename(finalTitle || "Article");
+        const safeYamlTitle = (finalTitle || "Article").replace(/"/g, '\\"');
+
         const fileContent = `---
-title: "${article.title}"
+title: "${safeYamlTitle}"
 url: ${url}
 date: ${date}
-tags: [inbox, from_anna]
+tags: [inbox, article, ai_translated]
 ---
 
-# ${article.title}
-
-${markdownBody}
+${finalBody}
 
 ---
 *Сохранено Анной: ${new Date().toLocaleString()}*
 `;
 
-        // 5. Сохраняем
-        if (!fs.existsSync(OBSIDIAN_PATH)) {
-             // Если папки нет внутри контейнера - пытаемся создать (но лучше чтобы она была при маунте)
-             fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
-        }
-
+        if (!fs.existsSync(OBSIDIAN_PATH)) fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
+        
         const fullPath = path.join(OBSIDIAN_PATH, fileName);
         fs.writeFileSync(fullPath, fileContent);
-        console.log(`[PARSER] Сохранено: ${fullPath}`);
+        console.log(`[PARSER] Файл создан: ${fullPath}`);
 
-        return article.title;
+        return finalTitle;
 
     } catch (error) {
         console.error("[PARSER ERROR]:", error.message);
-        throw error; // Прокидываем ошибку наверх, чтобы бот ответил
+        throw error; 
     }
 }
 

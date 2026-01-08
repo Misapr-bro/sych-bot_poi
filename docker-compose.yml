@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   sych-bot:
     build: .
     container_name: sych-bot
+    user: root
     restart: unless-stopped
     # Монтируем папку data, чтобы "память" бота не стерлась при перезагрузке
     volumes:
@@ -16,4 +15,4 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
