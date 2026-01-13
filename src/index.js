@@ -19,27 +19,27 @@ function getTimestamp() {
 console.log = (...args) => originalLog(getTimestamp(), ...args);
 console.error = (...args) => originalError(getTimestamp(), ...args);
 
-// === ИНИЦИАЛИЗАЦИЯ БОТА (ПЕРЕНЕСЕНО ВВЕРХ) ===
+// === ИНИЦИАЛИЗАЦИЯ БОТА ===
 const bot = new TelegramBot(config.telegramToken, { polling: true });
 
-// Настройка командного меню
+// Настройка командного меню (ДОБАВЛЕНА КОМАНДА MODEL)
 bot.setMyCommands([
-  { command: 'start', description: 'Запустить Анну и получить справку' },
-  { command: 'help', description: 'Показать список всех возможностей' },
-  { command: 'save', description: 'Сохранить сообщение (или реплай) в Obsidian' },
-  { command: 'mute', description: 'Включить/выключить режим тишины в чате' },
-  { command: 'reset', description: 'Сбросить контекст текущего диалога' }
+  { command: 'start', description: 'Запустить Анну' },
+  { command: 'model', description: '⚙️ Выбор модели AI' }, // <--- НОВОЕ
+  { command: 'save', description: 'Сохранить сообщение' },
+  { command: 'mute', description: 'Тихий режим' },
+  { command: 'reset', description: 'Сброс контекста' },
+  { command: 'help', description: 'Справка' }
 ]);
 
 console.log("Анна проснулась и готова к беседе.");
 console.log(`Admin ID: ${config.adminId}`);
 
-// [НОВОЕ] ПОДКЛЮЧАЕМ СЛУШАТЕЛЬ КНОПОК
+// Подключаем слушатель кнопок
 logic.setupCallback(bot);
 
-// === ОБРАБОТКА ОШИБОК (ТЕПЕРЬ ПОСЛЕ bot) ===
+// === ОБРАБОТКА ОШИБОК ===
 bot.on('polling_error', (error) => {
-    // Игнорируем временные ошибки сети
     if (error.code !== 'EFATAL' && error.code !== 'ETIMEDOUT' && error.code !== 'ECONNRESET') {
         console.error(`[POLLING ERROR] ${error.code}: ${error.message}`);
     }
@@ -51,21 +51,17 @@ setInterval(() => {
   
   if (pending.length > 0) {
       console.log(`[REMINDER] Сработало напоминаний: ${pending.length}`);
-      
       const idsToRemove = [];
 
       pending.forEach(task => {
           const message = `⏰ ${task.username}, напоминаю!\n\n${task.text}`;
-          
           bot.sendMessage(task.chatId, message).then(() => {
               console.log(`[REMINDER] Успешно отправлено: ${task.text}`);
           }).catch(err => {
               console.error(`[REMINDER ERROR] Не смог отправить в ${task.chatId}: ${err.message}`);
           });
-
           idsToRemove.push(task.id);
       });
-
       storage.removeReminders(idsToRemove);
   }
 }, 60 * 1000); 
@@ -78,6 +74,7 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const chatTitle = msg.chat.title || "Личка";
 
+  // ПРОВЕРКА БЕЗОПАСНОСТИ (ТВОЙ ОРИГИНАЛЬНЫЙ КОД)
   if (msg.chat.type !== 'private') {
       try {
           const adminMember = await bot.getChatMember(chatId, config.adminId);
@@ -104,6 +101,7 @@ bot.on('message', async (msg) => {
       }
   }
 
+  // ЕСЛИ АДМИН ВЫШЕЛ
   if (msg.left_chat_member && msg.left_chat_member.id === config.adminId) {
     console.log(`[SECURITY] Админ покинул "${chatTitle}". Ухожу.`);
     await bot.sendMessage(chatId, "Мой человек ушел, мне тоже пора.");
@@ -114,7 +112,6 @@ bot.on('message', async (msg) => {
   await logic.processMessage(bot, msg);
 });
 
-// Грейсфул шатдаун
 process.on('SIGINT', () => {
   console.log("Сохранение данных...");
   storage.forceSave(); 

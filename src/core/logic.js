@@ -8,12 +8,10 @@ const parser = require('../services/parser');
 const videoVision = require('../services/video_vision');
 
 // ============================================================
-// БЛОК 1: ГЛОБАЛЬНЫЕ СОСТОЯНИЯ И КОНСТАНТЫ
+// БЛОК 1: ГЛОБАЛЬНЫЕ СОСТОЯНИЯ
 // ============================================================
 
 const chatHistory = {};       
-const analysisBuffers = {};   
-const BUFFER_SIZE = 20;       
 const DEBUG = true; 
 
 function log(tag, message) {
@@ -23,18 +21,11 @@ function log(tag, message) {
     }
 }
 
-// [ВОССТАНОВЛЕНО] Функция истории (исправляет краш addToHistory is not defined)
 function addToHistory(chatId, role, text) {
     if (!chatHistory[chatId]) chatHistory[chatId] = [];
     chatHistory[chatId].push({ role, text });
-    if (chatHistory[chatId].length > 20) chatHistory[chatId].shift();
-}
-
-function getAnnaErrorReply(errText) {
-    const error = errText.toLowerCase();
-    if (error.includes('prohibited') || error.includes('safety')) return "🛑 Ошибка безопасности AI.";
-    if (error.includes('503') || error.includes('overloaded')) return "💤 Сервера перегружены.";
-    return "🛠 Технический сбой.";
+    const limit = config.contextSize || 30;
+    if (chatHistory[chatId].length > limit) chatHistory[chatId].shift();
 }
 
 function getReplyOptions(msg) {
@@ -59,7 +50,7 @@ function extractUrl(message) {
 }
 
 // ============================================================
-// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
+// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК (ПРИОРИТЕТЫ)
 // ============================================================
 
 async function processMessage(bot, msg) {
@@ -70,19 +61,19 @@ async function processMessage(bot, msg) {
     
     log("PROCESS", `Chat: ${chatId} | Msg: ${text.substring(0, 30)}...`);
 
-    // МЕНЮ ВЫБОРА МОДЕЛИ
-    if (text === "/model" || text === "⚙️ Модель") {
+    // 0. МЕНЮ ВЫБОРА МОДЕЛИ
+    if (text === "/model" || text === "⚙️ Выбор модели AI") {
         const modelKeyboard = {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "⚡ Gemini 2.5 Flash Lite", callback_data: "set_model:google/gemini-2.5-flash-lite" }],
-                    [{ text: "💎 Gemini 2.5 Flash", callback_data: "set_model:google/gemini-2.5-flash" }],
-                    [{ text: "🧠 Gemini 2.0 Pro Exp", callback_data: "set_model:google/gemini-2.0-pro-exp-02-05:free" }]
+                    [{ text: "⚡ Gemini 2.5 Lite (Чат/Эконом)", callback_data: "set_model:google/gemini-2.5-flash-lite-preview-02-05:free" }],
+                    [{ text: "💎 Gemini 2.5 Flash (Видео/Баланс)", callback_data: "set_model:google/gemini-2.5-flash-001" }],
+                    [{ text: "🧠 Gemini 2.0 Pro Exp (Мозг/Психолог)", callback_data: "set_model:google/gemini-2.0-pro-exp-02-05:free" }]
                 ]
             }
         };
-        await bot.sendMessage(chatId, `🔧 **Мозг Анны**\nТекущая модель: \`${ai.modelName}\``, getReplyOptions(msg));
-        await bot.sendMessage(chatId, "Выбери:", modelKeyboard);
+        await bot.sendMessage(chatId, `🔧 **Ядро Анны**\nТекущая модель: \`${ai.modelName}\``, getReplyOptions(msg));
+        await bot.sendMessage(chatId, "Список ядер:", modelKeyboard);
         return; 
     }
 
@@ -96,42 +87,121 @@ async function processMessage(bot, msg) {
     };
 
     try {
-        // --- 3.0. [НОВОЕ] РУЧНОЕ СОХРАНЕНИЕ (РЕПЛАЙ "В МД") ---
-        if (msg.reply_to_message && (text.toLowerCase().includes('в мд') || text === '/save')) {
-            const originalMsg = msg.reply_to_message;
-            const targetUrl = extractUrl(originalMsg);
-            
-            startTyping();
-            
-            // Сценарий А: Видео
-            if (targetUrl && (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be'))) {
-                 const result = await videoVision.processVideo(targetUrl);
-                 const savedTitle = parser.saveDirectContent(result.title, result.analysis);
-                 stopTyping();
-                 await bot.sendMessage(chatId, `✅ **Видео сохранено вручную**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
-                 return;
-            }
+        // ============================================================
+        // ПРИОРИТЕТ №1: РУЧНОЕ СОХРАНЕНИЕ ЧЕРЕЗ РЕПЛАЙ ("В МД")
+        // ============================================================
+        // Если ты отвечаешь на сообщение командой "save", "в мд", "md"
+        if (msg.reply_to_message) {
+            const triggerWords = ['в мд', 'save', 'сохрани', 'md', '/save'];
+            const isSaveCommand = triggerWords.some(w => text.toLowerCase().includes(w));
 
-            // Сценарий Б: Статья
-            if (targetUrl) {
-                const title = await parser.saveArticle(targetUrl);
-                stopTyping();
-                await bot.sendMessage(chatId, `✅ **Статья сохранена вручную**\n📄 ${title}`, getReplyOptions(msg));
-                return;
-            }
+            if (isSaveCommand) {
+                log("MANUAL", "Принудительное сохранение через реплай...");
+                startTyping();
+                
+                const originalMsg = msg.reply_to_message;
+                const targetUrl = extractUrl(originalMsg);
+                const originalText = originalMsg.text || originalMsg.caption || "";
 
-            // Сценарий В: Текст
-            const content = originalMsg.text || originalMsg.caption || "";
-            if (content) {
-                const safeTitle = content.substring(0, 40).replace(/[^\w\sа-яё]/gi, '') + "...";
-                const savedTitle = parser.saveDirectContent(`Заметка: ${safeTitle}`, content);
-                stopTyping();
-                await bot.sendMessage(chatId, `✅ **Текст сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
-                return;
+                // А: В реплае была ссылка (Видео или Статья)
+                if (targetUrl) {
+                    if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
+                        const result = await videoVision.processVideo(targetUrl);
+                        const savedTitle = parser.saveDirectContent(result.title, result.analysis);
+                        stopTyping();
+                        await bot.sendMessage(chatId, `✅ **Видео сохранено**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                        return;
+                    } else {
+                        const title = await parser.saveArticle(targetUrl);
+                        stopTyping();
+                        await bot.sendMessage(chatId, `✅ **Статья сохранена**\n📄 ${title}`, getReplyOptions(msg));
+                        return;
+                    }
+                }
+
+                // Б: В реплае был просто текст (или репост без ссылки)
+                if (originalText) {
+                    // Генерируем имя файла
+                    const safeTitle = originalText.substring(0, 40).replace(/[^\w\sа-яё]/gi, '') + "...";
+                    
+                    // Формируем контент как заметку
+                    const fileContent = `---
+date: ${new Date().toISOString().split('T')[0]}
+type: manual_note
+tags: [inbox, manual]
+---
+
+${originalText}`;
+
+                    const savedTitle = parser.saveDirectContent(`Note_${Date.now()}`, fileContent);
+                    stopTyping();
+                    await bot.sendMessage(chatId, `✅ **Текст сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                    return;
+                }
             }
         }
 
-        // --- 3.3. БОТ-ФИЛЬТР: ГОЛОСОВЫЕ ---
+        // ============================================================
+        // ПРИОРИТЕТ №2: АВТО-СОХРАНЕНИЕ РЕПОСТОВ (FORWARDS)
+        // ============================================================
+        // Ловит явные пересылки (если Telegram не стер заголовки)
+        if (msg.forward_date || msg.forward_from || msg.forward_from_chat) {
+            log("FORWARD", "Обнаружен репост. Сохраняю...");
+            startTyping();
+            
+            const senderName = msg.forward_from_chat ? msg.forward_from_chat.title : (msg.forward_from ? msg.forward_from.first_name : "Unknown");
+            const senderUsername = msg.forward_from_chat ? msg.forward_from_chat.username : (msg.forward_from ? msg.forward_from.username : null);
+            
+            // Если в репосте есть ссылка на YouTube -> Vision
+            if (foundUrl && (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be'))) {
+                 const result = await videoVision.processVideo(foundUrl);
+                 const savedTitle = parser.saveDirectContent(result.title, result.analysis);
+                 stopTyping();
+                 await bot.sendMessage(chatId, `💾 **Репост (Видео) сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                 return;
+            }
+
+            // Иначе сохраняем как текст/статью
+            const savedTitle = await parser.saveForwardedMessage(text, senderName, senderUsername, msg.chat.title, msg.message_id, chatId); // Исправлено: вызываем функцию сохранения
+            // Если saveForwardedMessage нет, используем saveDirectContent:
+            // const savedTitle = parser.saveDirectContent(`Repost_${senderName}`, text);
+            
+            stopTyping();
+            await bot.sendMessage(chatId, `💾 **Репост сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+            return;
+        }
+
+        // ============================================================
+        // ПРИОРИТЕТ №3: АВТО-ПАРСИНГ ССЫЛОК (КЛИППЕР)
+        // ============================================================
+        // Если сообщение это ТОЛЬКО ссылка (без длинного комментария)
+        if (foundUrl && text.length < 200) {
+            
+            // YouTube
+            if (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be')) {
+                log("YOUTUBE", "Vision анализ...");
+                startTyping();
+                const result = await videoVision.processVideo(foundUrl);
+                const savedTitle = parser.saveDirectContent(result.title, result.analysis);
+                stopTyping();
+                await bot.sendMessage(chatId, `✅ **Конспект видео**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                return;
+            }
+
+            // Статья
+            startTyping();
+            const title = await parser.saveArticle(foundUrl);
+            stopTyping();
+            await bot.sendMessage(chatId, "✍️ **Статья сохранена:** " + title, getReplyOptions(msg));
+            return;
+        }
+
+        // ============================================================
+        // ПРИОРИТЕТ №4: ЯДРО AI (ЧАТ)
+        // ============================================================
+        // Сюда попадаем, только если это не реплай "в мд", не репост и не просто ссылка
+        
+        // Бот-фильтр: Голосовые
         if (msg.voice || msg.audio) {
             startTyping();
             const media = msg.voice || msg.audio;
@@ -141,51 +211,24 @@ async function processMessage(bot, msg) {
             if (transcription && transcription.text) {
                 text = transcription.text;
                 await bot.sendMessage(chatId, "🎤 Расшифровка:\n" + text);
+                // Продолжаем выполнение, чтобы AI ответил на расшифровку
             }
         }
 
-        // --- 3.4. БОТ-ФИЛЬТР: YOUTUBE (AVTO) ---
-        if (foundUrl && (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be'))) {
-            log("YOUTUBE", "Запуск Vision анализа...");
-            startTyping();
-            try {
-                const result = await videoVision.processVideo(foundUrl);
-                const savedTitle = parser.saveDirectContent(result.title, result.analysis);
-                stopTyping();
-                await bot.sendMessage(chatId, `✅ **Конспект готов!**\n📄 Файл: \`${savedTitle.replace(/`/g, '')}\``, getReplyOptions(msg));
-                return;
-            } catch (e) {
-                stopTyping();
-                await bot.sendMessage(chatId, "❌ Ошибка видео: " + e.message);
-                return;
-            }
-        }
-
-        // --- 3.5. БОТ-ФИЛЬТР: СТАТЬИ (AVTO) ---
-        if (foundUrl && text.length < 500) {
-            startTyping();
-            const title = await parser.saveArticle(foundUrl);
-            stopTyping();
-            await bot.sendMessage(chatId, "✍️ Заметка сохранена: " + title, getReplyOptions(msg));
-            return;
-        }
-
-        // --- 3.6. МЕДИА (ФОТО) ---
-        let imageBuffer = null;
-        if (msg.photo || (msg.sticker && !msg.sticker.is_animated)) {
-            const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.sticker.file_id;
-            const link = await bot.getFileLink(fileId);
-            const resp = await axios.get(link, { responseType: 'arraybuffer' });
-            imageBuffer = Buffer.from(resp.data);
-        }
-
-        // --- 3.7. ЯДРО AI ---
-        if (text || imageBuffer) {
+        if (text || msg.photo) {
             startTyping();
             
             const instruction = storage.getUserInstruction(msg.from.username || "");
             const userProfile = storage.getProfile(chatId, userId);
             const history = chatHistory[chatId] || [];
+
+            let imageBuffer = null;
+            if (msg.photo) {
+                 const fileId = msg.photo[msg.photo.length - 1].file_id;
+                 const link = await bot.getFileLink(fileId);
+                 const resp = await axios.get(link, { responseType: 'arraybuffer' });
+                 imageBuffer = Buffer.from(resp.data);
+            }
 
             const aiResponse = await ai.getResponse(history, { text }, imageBuffer, "image/jpeg", instruction, userProfile);
             
@@ -195,7 +238,6 @@ async function processMessage(bot, msg) {
             }
 
             stopTyping();
-            
             addToHistory(chatId, msg.from.first_name, text);
             addToHistory(chatId, "Анна", aiResponse);
         }
@@ -203,13 +245,13 @@ async function processMessage(bot, msg) {
     } catch (fatalError) {
         log("FATAL", fatalError.message);
         stopTyping();
-        // Уведомляем пользователя только если это был явный запрос
         if (text.includes('/save') || text.includes('в мд')) {
-            await bot.sendMessage(chatId, "❌ Сбой сохранения: " + fatalError.message, getReplyOptions(msg));
+            await bot.sendMessage(chatId, "❌ Ошибка сохранения: " + fatalError.message, getReplyOptions(msg));
         }
     }
 }
 
+// Экспорт (не забудь!)
 function setupCallback(bot) {
     bot.on('callback_query', async (query) => {
         const data = query.data;

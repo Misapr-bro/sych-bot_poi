@@ -1,0 +1,5 @@
+node_modules
+.git
+data/*.json
+obsidian_inbox
+*.md
