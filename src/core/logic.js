@@ -11,18 +11,11 @@ const videoVision = require('../services/video_vision');
 // БЛОК 1: ГЛОБАЛЬНЫЕ СОСТОЯНИЯ И КОНСТАНТЫ
 // ============================================================
 
-// Хранилища временных данных в оперативной памяти
-const chatHistory = {};       // История диалогов для контекста AI
-const analysisBuffers = {};   // Буфер для накопления текстов перед анализом
-const BUFFER_SIZE = 20;       // Лимит строк в буфере анализа
-
-// Настройки отладки
+const chatHistory = {};       
+const analysisBuffers = {};   
+const BUFFER_SIZE = 20;       
 const DEBUG = true; 
 
-/**
- * Системный логгер с меткой времени.
- * Помогает отслеживать путь сообщения через фильтры.
- */
 function log(tag, message) {
     if (DEBUG) {
         const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
@@ -30,14 +23,13 @@ function log(tag, message) {
     }
 }
 
-// ============================================================
-// БЛОК 2: УТИЛИТЫ ФОРМАТИРОВАНИЯ И TELEGRAM API
-// ============================================================
+// [ВОССТАНОВЛЕНО] Функция истории (исправляет краш addToHistory is not defined)
+function addToHistory(chatId, role, text) {
+    if (!chatHistory[chatId]) chatHistory[chatId] = [];
+    chatHistory[chatId].push({ role, text });
+    if (chatHistory[chatId].length > 20) chatHistory[chatId].shift();
+}
 
-/**
- * Подблок: Генерация ответов на ошибки.
- * Превращает сухие технические ошибки в понятный пользователю текст.
- */
 function getAnnaErrorReply(errText) {
     const error = errText.toLowerCase();
     if (error.includes('prohibited') || error.includes('safety')) return "🛑 Ошибка безопасности AI.";
@@ -45,10 +37,6 @@ function getAnnaErrorReply(errText) {
     return "🛠 Технический сбой.";
 }
 
-/**
- * Подблок: Опции сообщений.
- * Настраивает Markdown и привязку ответа (Reply) к исходному сообщению.
- */
 function getReplyOptions(msg) {
     return { 
         reply_to_message_id: msg.message_id, 
@@ -57,13 +45,8 @@ function getReplyOptions(msg) {
     };
 }
 
-/**
- * Подблок: Извлечение URL (Smart Search).
- * Ищет ссылки в тексте, подписях и скрытых гиперссылках (entities).
- */
 function extractUrl(message) {
     const entities = message.entities || message.caption_entities || [];
-    // Сначала ищем в сущностях (пересланные посты, кнопки)
     for (const entity of entities) {
         if (entity.type === 'text_link') return entity.url;
         if (entity.type === 'url') {
@@ -71,25 +54,38 @@ function extractUrl(message) {
             return raw.substring(entity.offset, entity.offset + entity.length);
         }
     }
-    // Если сущностей нет, ищем регулярным выражением
     const match = (message.text || message.caption || "").match(/(https?:\/\/[^\s]+)/);
     return match ? match[0] : null;
 }
 
 // ============================================================
-// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (PROCESSMESSAGE)
+// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
 // ============================================================
 
 async function processMessage(bot, msg) {
-    // --- 3.1. Инициализация контекста ---
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     let text = msg.text || msg.caption || "";
-    const foundUrl = extractUrl(msg); // Извлекаем URL через Smart Search
+    const foundUrl = extractUrl(msg); 
     
     log("PROCESS", `Chat: ${chatId} | Msg: ${text.substring(0, 30)}...`);
 
-    // --- 3.2. Управление индикацией "typing" ---
+    // МЕНЮ ВЫБОРА МОДЕЛИ
+    if (text === "/model" || text === "⚙️ Модель") {
+        const modelKeyboard = {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "⚡ Gemini 2.5 Flash Lite", callback_data: "set_model:google/gemini-2.5-flash-lite" }],
+                    [{ text: "💎 Gemini 2.5 Flash", callback_data: "set_model:google/gemini-2.5-flash" }],
+                    [{ text: "🧠 Gemini 2.0 Pro Exp", callback_data: "set_model:google/gemini-2.0-pro-exp-02-05:free" }]
+                ]
+            }
+        };
+        await bot.sendMessage(chatId, `🔧 **Мозг Анны**\nТекущая модель: \`${ai.modelName}\``, getReplyOptions(msg));
+        await bot.sendMessage(chatId, "Выбери:", modelKeyboard);
+        return; 
+    }
+
     let typingTimer = null;
     const stopTyping = () => { if (typingTimer) { clearInterval(typingTimer); typingTimer = null; } };
     const startTyping = () => {
@@ -100,23 +96,59 @@ async function processMessage(bot, msg) {
     };
 
     try {
-        // --- 3.3. БОТ-ФИЛЬТР: ГОЛОСОВЫЕ И АУДИО ---
+        // --- 3.0. [НОВОЕ] РУЧНОЕ СОХРАНЕНИЕ (РЕПЛАЙ "В МД") ---
+        if (msg.reply_to_message && (text.toLowerCase().includes('в мд') || text === '/save')) {
+            const originalMsg = msg.reply_to_message;
+            const targetUrl = extractUrl(originalMsg);
+            
+            startTyping();
+            
+            // Сценарий А: Видео
+            if (targetUrl && (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be'))) {
+                 const result = await videoVision.processVideo(targetUrl);
+                 const savedTitle = parser.saveDirectContent(result.title, result.analysis);
+                 stopTyping();
+                 await bot.sendMessage(chatId, `✅ **Видео сохранено вручную**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                 return;
+            }
+
+            // Сценарий Б: Статья
+            if (targetUrl) {
+                const title = await parser.saveArticle(targetUrl);
+                stopTyping();
+                await bot.sendMessage(chatId, `✅ **Статья сохранена вручную**\n📄 ${title}`, getReplyOptions(msg));
+                return;
+            }
+
+            // Сценарий В: Текст
+            const content = originalMsg.text || originalMsg.caption || "";
+            if (content) {
+                const safeTitle = content.substring(0, 40).replace(/[^\w\sа-яё]/gi, '') + "...";
+                const savedTitle = parser.saveDirectContent(`Заметка: ${safeTitle}`, content);
+                stopTyping();
+                await bot.sendMessage(chatId, `✅ **Текст сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
+                return;
+            }
+        }
+
+        // --- 3.3. БОТ-ФИЛЬТР: ГОЛОСОВЫЕ ---
         if (msg.voice || msg.audio) {
             startTyping();
             const media = msg.voice || msg.audio;
             const link = await bot.getFileLink(media.file_id);
             const resp = await axios.get(link, { responseType: 'arraybuffer' });
             const transcription = await ai.transcribeAudio(Buffer.from(resp.data), msg.from.first_name);
-            text = transcription.text; // Передаем текст дальше для AI-ответа
-            await bot.sendMessage(chatId, "🎤 Расшифровка:\n" + text);
+            if (transcription && transcription.text) {
+                text = transcription.text;
+                await bot.sendMessage(chatId, "🎤 Расшифровка:\n" + text);
+            }
         }
 
-        // --- 3.4. БОТ-ФИЛЬТР: YOUTUBE VISION (NATIVE) ---
+        // --- 3.4. БОТ-ФИЛЬТР: YOUTUBE (AVTO) ---
         if (foundUrl && (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be'))) {
             log("YOUTUBE", "Запуск Vision анализа...");
             startTyping();
             try {
-                // Видео-сервис сам вернет {title, analysis} на основе AI-просмотра
                 const result = await videoVision.processVideo(foundUrl);
                 const savedTitle = parser.saveDirectContent(result.title, result.analysis);
                 stopTyping();
@@ -129,7 +161,7 @@ async function processMessage(bot, msg) {
             }
         }
 
-        // --- 3.5. БОТ-ФИЛЬТР: ВЕБ-КЛИППЕР (СТАТЬИ) ---
+        // --- 3.5. БОТ-ФИЛЬТР: СТАТЬИ (AVTO) ---
         if (foundUrl && text.length < 500) {
             startTyping();
             const title = await parser.saveArticle(foundUrl);
@@ -138,7 +170,7 @@ async function processMessage(bot, msg) {
             return;
         }
 
-        // --- 3.6. БОТ-ФИЛЬТР: МЕДИА-АНАЛИЗ (PHOTO/STICKER) ---
+        // --- 3.6. МЕДИА (ФОТО) ---
         let imageBuffer = null;
         if (msg.photo || (msg.sticker && !msg.sticker.is_animated)) {
             const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.sticker.file_id;
@@ -147,19 +179,16 @@ async function processMessage(bot, msg) {
             imageBuffer = Buffer.from(resp.data);
         }
 
-        // --- 3.7. ЯДРО: ГЕНЕРАЦИЯ ОТВЕТА AI ---
+        // --- 3.7. ЯДРО AI ---
         if (text || imageBuffer) {
             startTyping();
             
-            // Подготовка инструкций и контекста
             const instruction = storage.getUserInstruction(msg.from.username || "");
             const userProfile = storage.getProfile(chatId, userId);
             const history = chatHistory[chatId] || [];
 
-            // Запрос к AI
             const aiResponse = await ai.getResponse(history, { text }, imageBuffer, "image/jpeg", instruction, userProfile);
             
-            // Нарезка ответа на чанки для обхода лимитов Telegram (4096 симв.)
             const chunks = aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse];
             for (const chunk of chunks) {
                 await bot.sendMessage(chatId, chunk, getReplyOptions(msg));
@@ -167,7 +196,6 @@ async function processMessage(bot, msg) {
 
             stopTyping();
             
-            // Сохранение в историю и фоновый анализ
             addToHistory(chatId, msg.from.first_name, text);
             addToHistory(chatId, "Анна", aiResponse);
         }
@@ -175,7 +203,23 @@ async function processMessage(bot, msg) {
     } catch (fatalError) {
         log("FATAL", fatalError.message);
         stopTyping();
+        // Уведомляем пользователя только если это был явный запрос
+        if (text.includes('/save') || text.includes('в мд')) {
+            await bot.sendMessage(chatId, "❌ Сбой сохранения: " + fatalError.message, getReplyOptions(msg));
+        }
     }
 }
 
-module.exports = { processMessage };
+function setupCallback(bot) {
+    bot.on('callback_query', async (query) => {
+        const data = query.data;
+        if (data && data.startsWith("set_model:")) {
+            const newModel = data.split(":")[1];
+            ai.modelName = newModel;
+            await bot.answerCallbackQuery(query.id, { text: "Модель изменена" });
+            await bot.sendMessage(query.message.chat.id, `✅ Ядро обновлено: \`${newModel}\``);
+        }
+    });
+}
+
+module.exports = { processMessage, setupCallback };

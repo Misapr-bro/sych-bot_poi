@@ -34,6 +34,9 @@ bot.setMyCommands([
 console.log("Анна проснулась и готова к беседе.");
 console.log(`Admin ID: ${config.adminId}`);
 
+// [НОВОЕ] ПОДКЛЮЧАЕМ СЛУШАТЕЛЬ КНОПОК
+logic.setupCallback(bot);
+
 // === ОБРАБОТКА ОШИБОК (ТЕПЕРЬ ПОСЛЕ bot) ===
 bot.on('polling_error', (error) => {
     // Игнорируем временные ошибки сети

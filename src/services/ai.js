@@ -3,194 +3,290 @@ const config = require('../config');
 const prompts = require('../core/prompts');
 
 class AiService {
-    // ==========================================
-    // БЛОК 1: ИНИЦИАЛИЗАЦИЯ И УПРАВЛЕНИЕ КЛЮЧАМИ
-    // ==========================================
-    constructor() {
-        this.keyIndex = 0;
-        this.keys = config.geminiKeys && config.geminiKeys.length > 0 ? config.geminiKeys : [config.aiApiKey];
-        
-        if (this.keys.length === 0 || !this.keys[0]) {
-            console.error("CRITICAL: Ключи API не найдены!");
+  constructor() {
+    this.keyIndex = 0;
+    
+    // Поддержка массива ключей
+    this.keys = config.geminiKeys && config.geminiKeys.length > 0 
+        ? config.geminiKeys 
+        : [config.aiApiKey];
+
+    if (this.keys.length === 0 || !this.keys[0]) console.error("CRITICAL: Нет API ключей в конфигурации!");
+    
+    this.client = null;
+    this.modelName = config.modelName || "google/gemini-2.5-flash-lite"; // Дефолтная модель
+    this.initModel();
+  }
+
+  initModel() {
+    const currentKey = this.keys[this.keyIndex];
+    
+    this.client = new OpenAI({
+        apiKey: currentKey,
+        baseURL: config.aiBaseUrl || "https://openrouter.ai/api/v1",
+        defaultHeaders: {
+            "HTTP-Referer": "https://telegram-bot.local",
+            "X-Title": "Anna Secretary Bot"
         }
+    });
+  }
 
-        this.client = null;
-        // Актуальные модели 2026 года
-        this.fallbackModel = "google/gemini-2.5-flash-lite"; 
-        this.initModel();
-    }
+  rotateKey() {
+    this.keyIndex = (this.keyIndex + 1) % this.keys.length;
+    console.log("AI WARNING: Лимит ключа! Переключаюсь на ключ " + (this.keyIndex + 1));
+    this.initModel();
+  }
 
-    /**
-     * Подблок: Настройка клиента.
-     * Здесь мы задаем базовую модель и параметры подключения к OpenRouter.
-     */
-    initModel() {
-        const currentKey = this.keys[this.keyIndex];
-        this.client = new OpenAI({
-            apiKey: currentKey,
-            baseURL: config.aiBaseUrl || "https://openrouter.ai/api/v1",
-            defaultHeaders: {
-                "HTTP-Referer": "https://anna-secretary.local",
-                "X-Title": "Anna AI Secretary"
-            }
-        });
-        // Если в конфиге старая модель, подстраховываемся
-        this.modelName = config.modelName || this.fallbackModel;
-    }
-
-    /**
-     * Подблок: Ротация ключей и попытки.
-     */
-    async executeWithRetry(apiCallFn) {
-        for (let attempt = 0; attempt < this.keys.length + 1; attempt++) {
-            try {
-                return await apiCallFn();
-            } catch (error) {
-                console.error(`[AI_ERROR] Попытка ${attempt}: ${error.message}`);
-                
-                // Если модель не найдена (ошибка 400), пробуем переключиться на стабильный Flash Lite
-                if (error.status === 400 && this.modelName !== this.fallbackModel) {
-                    console.log(`[AI_FIX] Модель ${this.modelName} невалидна. Откат на ${this.fallbackModel}`);
-                    this.modelName = this.fallbackModel;
-                    return await apiCallFn();
-                }
-
-                const isQuota = error.status === 429 || error.message.includes('Quota');
-                if (isQuota && this.keys.length > 1) {
-                    this.keyIndex = (this.keyIndex + 1) % this.keys.length;
-                    this.initModel();
-                    continue;
-                }
-                
-                async executeWithRetry(apiCallFn) {
+  // === ИСПРАВЛЕННЫЙ МЕТОД: ОШИБКИ И ПОВТОРЫ ===
+  async executeWithRetry(apiCallFn) {
     for (let attempt = 0; attempt < this.keys.length + 1; attempt++) {
         try {
             return await apiCallFn();
         } catch (error) {
-            console.error(`[AI_ERROR] Попытка ${attempt}: ${error.message}`);
+            console.error("AI ERROR Attempt " + attempt + ": " + error.message);
             
-            // Если это 404 или 400 — пробрасываем детали в месседж
+            // ПРОБРОС ОШИБКИ В ЧАТ (если модель недоступна/удалена)
             if (error.status === 404 || error.status === 400) {
-                throw new Error(`⚠️ Ошибка модели (${this.modelName}): ${error.message}`);
+                 throw new Error(`Ошибка модели [${this.modelName}]: ${error.message}. Смените через /model`);
             }
-                
-                if (attempt < 2) {
-                    await new Promise(res => setTimeout(res, 2000));
-                    continue;
-                }
+            
+            const isQuotaError = error.status === 429 || error.message.includes('Quota') || error.message.includes('Rate limit');
+            
+            if (isQuotaError && this.keys.length > 1) {
+                this.rotateKey();
+                continue;
+            } else if (attempt < 2) {
+                await new Promise(res => setTimeout(res, 2000));
+                continue;
+            } else {
                 throw error;
             }
         }
-        throw new Error("Анна временно недоступна (API Error).");
     }
+    throw new Error("Не удалось получить ответ от нейросети.");
+  }
 
-    // ==========================================
-    // БЛОК 2: ФОРМАТИРОВАНИЕ КОНТЕКСТА
-    // ==========================================
+  getCurrentTime() {
+    return new Date().toLocaleString("ru-RU", {
+      timeZone: "Europe/Berlin",
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+  }
 
-    getCurrentTime() {
-        return new Date().toLocaleString("ru-RU", {
-            timeZone: "Europe/Berlin",
-            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-            hour: '2-digit', minute: '2-digit'
-        });
-    }
+  formatMessages(history, currentMessage, userInstruction, userProfile, systemText) {
+      const messages = [];
+      
+      // === ЯЗЫКОВОЙ ФИЛЬТР: СТРОГО РУССКИЙ ===
+      const langForce = "\n\n!!! ВАЖНО: Всегда отвечай СТРОГО на РУССКОМ ЯЗЫКЕ, независимо от языка входящих данных.";
+      messages.push({ role: "system", content: systemText + langForce });
 
-    /**
-     * Подблок: Сборка промпта.
-     * Принудительно внедряем инструкцию о русском языке.
-     */
-    formatMessages(history, currentMessage, userInstruction, userProfile, systemText) {
-        const messages = [];
-        
-        // ЖЕСТКАЯ УСТАНОВКА: Всегда на русском
-        const languageForce = "\n\n!!! ВАЖНО: Всегда отвечай СТРОГО на русском языке, независимо от языка входящих данных.";
-        messages.push({ role: "system", content: systemText + languageForce });
+      const relevantHistory = history.slice(-20);
+      relevantHistory.forEach(msg => {
+          let role = "user";
+          if (msg.role === "assistant" || msg.role === "model" || msg.sender === "Bot" || msg.role === "Анна") role = "assistant";
+          
+          if (msg.text && msg.text.trim()) {
+              messages.push({ role: role, content: msg.text });
+          }
+      });
 
-        // История (лимит 20 сообщений для экономии токенов)
-        history.slice(-20).forEach(msg => {
-            let role = (msg.role === "assistant" || msg.role === "Анна") ? "assistant" : "user";
-            if (msg.text) messages.push({ role, content: msg.text });
-        });
+      let finalUserText = currentMessage.text;
+      if (currentMessage.replyText) {
+          finalUserText = "!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n" + currentMessage.replyText + "\n\n" + finalUserText;
+      }
+      if (userInstruction) {
+          finalUserText += "\n\n!!! СПЕЦ-ИНСТРУКЦИЯ:\n" + userInstruction;
+      }
+      if (userProfile) {
+          const score = userProfile.relationship || 50;
+          let relationText = "";
+          if (score <= 20) relationText = "СТАТУС: ВРАГ (" + score + "/100).";
+          else if (score <= 40) relationText = "СТАТУС: ХОЛОД (" + score + "/100).";
+          else if (score >= 80) relationText = "СТАТУС: БРАТАН (" + score + "/100).";
 
-        let userText = currentMessage.text;
-        
-        // Интеграция досье и статуса отношений
-        if (userProfile) {
-            const score = userProfile.relationship || 50;
-            const status = score >= 80 ? "БРАТАН" : (score <= 30 ? "ХОЛОД" : "НЕЙТРАЛ");
-            const profileInfo = `--- ДОСЬЕ: ${status} (${score}/100) ---\nФакты: ${userProfile.facts || "нет"}\n---\n`;
-            userText = profileInfo + userText;
+          const profileInfo = "\n--- ДОСЬЕ ---\nФакты: " + (userProfile.facts || "Нет") + "\n" + relationText + "\n-----------------\n";
+          finalUserText = profileInfo + finalUserText;
+      }
+      
+      finalUserText = "[Время: " + this.getCurrentTime() + "]\n" + finalUserText;
+
+      return { messages, finalUserText };
+  }
+  
+  async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
+    const requestLogic = async () => {
+        const systemPrompt = prompts.system() + (isSpontaneous ? "\n[РЕЖИМ: Спонтанное сообщение]" : "");
+        const { messages, finalUserText } = this.formatMessages(history, currentMessage, userInstruction, userProfile, systemPrompt);
+
+        const lastMessageContent = [];
+        lastMessageContent.push({ type: "text", text: finalUserText });
+
+        if (imageBuffer) {
+            const base64Image = imageBuffer.toString("base64");
+            lastMessageContent.push({
+                type: "image_url",
+                image_url: { url: "data:" + mimeType + ";base64," + base64Image }
+            });
         }
 
-        if (userInstruction) userText += `\n\n[СПЕЦ-ИНСТРУКЦИЯ]: ${userInstruction}`;
+        messages.push({ role: "user", content: lastMessageContent });
+
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: messages,
+            max_tokens: 2500,
+            temperature: 0.9,
+        });
+
+        let text = response.choices[0].message.content;
+        text = text.replace(/^<think>[\s\S]*?<\/think>/i, ''); 
+        text = text.replace(/^thought[\s\S]*?\n\n/i, '');
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim(); 
         
-        const finalContent = `[Время: ${this.getCurrentTime()}]\n${userText}`;
-        return { messages, finalContent };
+        return text;
+    };
+
+    try { return await this.executeWithRetry(requestLogic); } catch (e) { throw e; }
+  }
+
+  async determineReaction(contextText) {
+    const allowed = ["👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"];
+    const requestLogic = async () => {
+        const promptText = prompts.reaction(contextText, allowed.join(" "));
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }],
+            temperature: 0.5,
+            max_tokens: 10
+        });
+        let text = response.choices[0].message.content.trim();
+        const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
+        if (match && allowed.includes(match[0])) return match[0];
+        return null;
+    };
+    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+  }
+
+  async analyzeUserImmediate(lastMessages, currentProfile) {
+    const requestLogic = async () => {
+        const promptText = prompts.analyzeImmediate(currentProfile, lastMessages);
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }],
+            response_format: { type: "json_object" },
+            temperature: 0.7
+        });
+        let text = response.choices[0].message.content;
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(text);
+    };
+    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+  }
+
+  async analyzeBatch(messagesBatch, currentProfiles) {
+    const requestLogic = async () => {
+        const chatLog = messagesBatch.map(m => ("ID:" + m.userId + " " + m.name + ": " + m.text)).join('\n');
+        const knownInfo = Object.entries(currentProfiles).map(([uid, p]) => ("ID:" + uid + " -> " + p.realName + ", " + p.facts)).join('\n');
+        const promptText = prompts.analyzeBatch(knownInfo, chatLog);
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }],
+            response_format: { type: "json_object" }
+        });
+        let text = response.choices[0].message.content;
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(text);
+    };
+    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+  }
+
+  async generateProfileDescription(profileData, targetName) {
+     const requestLogic = async () => {
+        const promptText = prompts.profileDescription(targetName, profileData);
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }]
+        });
+        return response.choices[0].message.content;
+     };
+     try { return await this.executeWithRetry(requestLogic); } catch(e) { return "Не знаю такого."; }
+  }
+
+  async generateFlavorText(task, result) {
+    const requestLogic = async () => {
+        const promptText = prompts.flavor(task, result);
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }],
+            temperature: 1.0 
+        });
+        return response.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+    };
+    try { return await this.executeWithRetry(requestLogic); } catch(e) { return "" + result; }
+  }
+  
+  async shouldAnswer(lastMessages) {
+    const requestLogic = async () => {
+      const promptText = prompts.shouldAnswer(lastMessages);
+      const response = await this.client.chat.completions.create({
+          model: this.modelName,
+          messages: [{ role: "user", content: promptText }],
+          max_tokens: 10
+      });
+      return response.choices[0].message.content.toUpperCase().includes('YES');
+  };
+    try { return await this.executeWithRetry(requestLogic); } catch(e) { return false; }
+  }
+
+  async transcribeAudio(audioBuffer, userName = "Пользователь", mimeType = "audio/ogg") {
+    // Большинство моделей OpenRouter text-only. Возвращаем null.
+    return null; 
+  }
+
+  async parseReminder(userText, contextText = "") {
+    const requestLogic = async () => {
+        const now = this.getCurrentTime(); 
+        const promptText = prompts.parseReminder(now, userText, contextText);
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: promptText }],
+            response_format: { type: "json_object" }
+        });
+        let text = response.choices[0].message.content;
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(text);
+    };
+    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+  }
+
+  // === МЕТОД ДЛЯ YOUTUBE (ТЕПЕРЬ ВНУТРИ КЛАССА) ===
+  async processYouTubeTranscript(title, transcript) {
+    const prompt = prompts.youtubeEditor(title, transcript);
+    
+    // Используем тот же клиент, чтобы не создавать новый
+    const requestLogic = async () => {
+        const response = await this.client.chat.completions.create({
+            model: this.modelName,
+            messages: [{ role: "user", content: prompt }]
+        });
+        return response.choices[0].message.content;
+    };
+
+    try { return await this.executeWithRetry(requestLogic); } catch (error) {
+        console.error("AI YouTube Error:", error);
+        throw new Error("Слишком длинное видео или ошибка API.");
     }
-
-    // ==========================================
-    // БЛОК 3: ОСНОВНЫЕ МЕТОДЫ AI
-    // ==========================================
-
-    async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null) {
-        const requestLogic = async () => {
-            const systemPrompt = prompts.system();
-            const { messages, finalContent } = this.formatMessages(history, currentMessage, userInstruction, userProfile, systemPrompt);
-
-            const lastMessage = [{ type: "text", text: finalContent }];
-
-            if (imageBuffer) {
-                const b64 = imageBuffer.toString("base64");
-                lastMessage.push({
-                    type: "image_url",
-                    image_url: { url: `data:${mimeType};base64,${b64}` }
-                });
-            }
-
-            messages.push({ role: "user", content: lastMessage });
-
-            const response = await this.client.chat.completions.create({
-                model: this.modelName,
-                messages: messages,
-                max_tokens: 2500,
-                temperature: 0.8,
-            });
-
-            let text = response.choices[0].message.content;
-            // Очистка от технического мусора
-            return text.replace(/^<think>[\s\S]*?<\/think>/i, '').trim();
-        };
-
-        return await this.executeWithRetry(requestLogic);
-    }
-
-    /**
-     * Подблок: Транскрибация аудио.
-     * Gemini 2.5 Flash Lite отлично справляется с аудио напрямую.
-     */
-    async transcribeAudio(audioBuffer, userName = "User", mimeType = "audio/ogg") {
-        // Если провайдер поддерживает аудио в чате, можно слать как картинку (base64)
-        // Для OpenRouter пока оставляем заглушку или используем Whisper, если доступен.
-        return null; 
-    }
-
-    // ==========================================
-    // БЛОК 4: АНАЛИТИКА И ДОПОЛНИТЕЛЬНО
-    // ==========================================
-
-    async analyzeUserImmediate(lastMessages, currentProfile) {
-        const requestLogic = async () => {
-            const prompt = prompts.analyzeImmediate(currentProfile, lastMessages);
-            const response = await this.client.chat.completions.create({
-                model: this.fallbackModel, // Используем стабильную модель для аналитики
-                messages: [{ role: "user", content: prompt }],
-                response_format: { type: "json_object" }
-            });
-            return JSON.parse(response.choices[0].message.content);
-        };
-        try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
-    }
-}
+  }
+} // <--- ВОТ ЗДЕСЬ БЫЛА ПОТЕРЯНА СКОБКА, ТЕПЕРЬ ОНА НА МЕСТЕ
 
 module.exports = new AiService();
