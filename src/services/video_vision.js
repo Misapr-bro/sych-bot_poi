@@ -1,88 +1,107 @@
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-// === БЛОК: ИМПОРТЫ ===
-// Почему: Подключаем prompts для получения инструкции анализа видео
-const prompts = require('../core/prompts');
+const youtube = require('./youtube');
 
+// --- КОНФИГУРАЦИЯ ---
+const GEN_AI_KEY = process.env.GOOGLE_API_KEY; // Ключ для Vision
+const VISION_MODEL_NAME = "gemini-2.0-flash"; // Можно gemini-1.5-pro
 
-// ==========================================
-// БЛОК 1: ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКИ
-// ==========================================
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+// Инициализация AI
+const genAI = GEN_AI_KEY ? new GoogleGenerativeAI(GEN_AI_KEY) : null;
 
-// Настройки модели (вынесено отдельно для удобства смены модели)
-const MODEL_CONFIG = {
-    model: "gemini-2.0-flash",
-    timeout: 600000 // 10 минут
-};
+/**
+ * Основной метод: Обработка видео по ссылке.
+ * 1. Получает транскрипт и метаданные (через youtube.js).
+ * 2. Анализирует контент через Gemini Vision (если нужно) или просто Текст.
+ * 3. Возвращает структуру { title, analysis }.
+ */
+async function processVideo(url) {
+    if (!genAI) {
+        throw new Error("GOOGLE_API_KEY не найден. Vision недоступен.");
+    }
 
-// ==========================================
-// БЛОК 2: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (CLEANERS)
-// ==========================================
+    console.log(`[VISION] Начинаю анализ видео: ${url}`);
 
-// Очистка ответа Gemini от Markdown-мусора
-function cleanGeminiOutput(text) {
-    if (!text) return "";
-    return text
-        .replace(/```[a-z]*\n?/gi, '') 
-        .replace(/```/g, '')
-        .replace(/[*_`]/g, '')
-        .trim();
+    // 1. Получаем данные видео (Транскрипт + Мета)
+    // Используем существующий youtube сервис, он надежен
+    const videoData = await youtube.getTranscript(url);
+
+    if (!videoData) {
+        throw new Error("Не удалось скачать информацию о видео (yt-dlp error).");
+    }
+
+    // 2. Готовим промпт для AI
+    const model = genAI.getGenerativeModel({ model: VISION_MODEL_NAME });
+
+    // Если есть текст (транскрипт), анализируем его — это быстрее и точнее для сути
+    if (videoData.text) {
+        return await analyzeTranscript(model, videoData);
+    }
+
+    // Если транскрипта нет (редко), можно было бы качать кадры, 
+    // но пока вернем ошибку, так как yt-dlp обычно достает всё.
+    throw new Error("У видео нет субтитров, анализ невозможен.");
 }
 
-// Защита имени файла для файловой системы
-function sanitizeTitle(title) {
-    if (!title) return "Video_Note_" + Date.now();
-    let clean = cleanGeminiOutput(title).replace(/^TITLE:\s*/i, '');
-    return clean
-        .replace(/[\\/!?:*|"<>]/g, '') 
-        .replace(/\s+/g, '_')
-        .substring(0, 80)
-        .trim();
-}
+/**
+ * Анализ текстовой расшифровки видео.
+ */
+async function analyzeTranscript(model, videoData) {
+    console.log(`[VISION] Анализирую транскрипт (${videoData.text.length} симв)...`);
 
-// ==========================================
-// БЛОК 3: ОСНОВНАЯ ЛОГИКА АНАЛИЗА
-// ==========================================
+    const prompt = `
+    РОЛЬ: Ты — Технический Аналитик и Креативный Помощник (Анна).
+    ЗАДАЧА: Сделай глубокий разбор этого видео.
 
-async function processVideo(youtubeUrl) {
-    const model = genAI.getGenerativeModel(
-        { model: MODEL_CONFIG.model },
-        { timeout: MODEL_CONFIG.timeout }
-    );
+    МЕТАДАННЫЕ:
+    - Название: ${videoData.title}
+    - Автор: ${videoData.author}
+    - Длительность: ${videoData.duration} сек.
 
-    console.log(`[VISION] Анализ URL (${MODEL_CONFIG.model}): ${youtubeUrl}`);
+    ТРАНСКРИПТ:
+    "${videoData.text.substring(0, 50000)}" 
+    (текст может быть обрезан, если очень длинный)
 
-    // === ИЗМЕНЕНИЕ: ИСПОЛЬЗОВАНИЕ ЦЕНТРАЛЬНОГО ПРОМПТА ===
-    const prompt = prompts.videoVision(youtubeUrl);
+    ТРЕБОВАНИЯ К ОТВЕТУ (Markdown):
+    1. Начни с заголовка (Название видео).
+    2. Раздел "💡 Главная мысль": В 1-2 предложениях.
+    3. Раздел "🔑 Ключевые инсайты": Список из 3-5 самых важных идей.
+    4. Раздел "⚙️ Технические детали" (если есть): Инструменты, код, библиотеки, методы.
+    5. Раздел "🧠 Психология/Софт-скиллы" (если есть): О чем говорилось в контексте людей.
+    6. Раздел "📝 Конспект": Структурированный пересказ содержания.
+
+    ВАЖНО: Пиши живо, интересно и СТРОГО НА РУССКОМ ЯЗЫКЕ.
+    `;
 
     try {
-        const result = await model.generateContent([
-            {
-                fileData: {
-                    mimeType: "video/mp4", 
-                    fileUri: youtubeUrl // Native Bridge
-                }
-            },
-            { text: prompt }
-        ]);
+        const result = await model.generateContent(prompt);
+        const response = result.response.text();
 
-        const fullResponse = result.response.text();
-        const lines = fullResponse.split('\n');
-        
-        // Извлечение заголовка
-        let rawTitle = lines.find(l => l.startsWith('TITLE:')) || lines[0];
-        const cleanTitle = sanitizeTitle(rawTitle);
-        
-        // Извлечение конспекта
-        const analysisText = lines.filter(l => !l.startsWith('TITLE:')).join('\n').trim();
+        // Формируем контент для Obsidian
+        const finalContent = `---
+type: video-note
+url: https://www.youtube.com/watch?v=${videoData.videoId}
+author: ${videoData.author}
+date: ${new Date().toISOString().split('T')[0]}
+tags: [video, analysis, ai-generated]
+---
+
+${response}
+
+---
+*Анализ выполнен Анной (Gemini Vision) за ${(videoData.duration / 60).toFixed(1)} мин просмотра.*
+`;
 
         return {
-            title: cleanTitle.length > 2 ? cleanTitle : `Video_${Date.now()}`,
-            analysis: analysisText
+            title: videoData.title,
+            analysis: finalContent
         };
-    } catch (error) {
-        console.error("[GEMINI_ERROR]", error.message);
-        throw new Error("Ошибка API Gemini: " + error.message);
+
+    } catch (e) {
+        console.error("[VISION ERROR]", e);
+        throw new Error("Ошибка AI при генерации разбора.");
     }
 }
 
