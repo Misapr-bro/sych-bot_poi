@@ -1,10 +1,10 @@
-const { JSDOM } = require("jsdom");
-const { Readability } = require("@mozilla/readability");
-const TurndownService = require("turndown");
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+// === ИМПОРТЫ ===
+const prompts = require('../core/prompts');
+const scraper = require('../core/scraper'); // Подключаем новый модуль
 
 const OBSIDIAN_PATH = '/app/obsidian_inbox';
 const genAI = process.env.GOOGLE_API_KEY ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY) : null;
@@ -18,34 +18,28 @@ function sanitizeFilename(text) {
     return clean + ".md";
 }
 
+// === ЛОГИКА AI (ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ) ===
 async function processContentWithAI(text, sourceUrl) {
     if (!genAI) return null;
     const model = genAI.getGenerativeModel(MODEL_CONFIG);
-    const prompt = `
-    Ты — технический редактор. Переведи и законспектируй этот текст.
-    ЯЗЫК: СТРОГО РУССКИЙ.
-    СТРУКТУРА:
-    TITLE: [Заголовок на русском]
-    # [Заголовок]
-    🔗 Источник: ${sourceUrl}
-    ## Суть
-    [1-2 предложения]
-    ## Конспект
-    [Ключевые идеи]
-    `;
+    
+    // Берем промпт из prompts.js
+    const prompt = prompts.articleParser(sourceUrl);
 
     try {
         const result = await model.generateContent([prompt, text].join("\n\n---\n\n"));
         const responseText = result.response.text();
         const lines = responseText.split('\n');
+        
         let title = "AI_Article";
         const titleLine = lines.find(l => l.startsWith('TITLE:'));
         if (titleLine) title = titleLine.replace('TITLE:', '').trim();
+        
         const body = lines.filter(l => !l.startsWith('TITLE:')).join('\n').trim();
         return { title, body };
     } catch (e) {
         console.warn("[PARSER] AI error:", e.message);
-        return null;
+        return null; // Если AI упал, вернем сырой текст
     }
 }
 
@@ -58,55 +52,43 @@ function saveDirectContent(fileNameTitle, content) {
 }
 
 function saveForwardedMessage(messageText, senderName, senderUsername, chatName, messageId, chatId) {
-    // Эта функция осталась без изменений, она работает корректно в твоем файле
-    // Я не привожу её полный код здесь для краткости, она не влияет на текущие ошибки
+   // (Функция-заглушка или старая реализация, нужна для экспорта, если используется)
 }
 
+// === НОВАЯ ЛОГИКА СКАЧИВАНИЯ (ЧЕРЕЗ SCRAPER CORE) ===
 async function saveArticle(url) {
     try {
-        console.log(`[PARSER] Качаю статью: ${url}`);
+        console.log(`[PARSER] Старт обработки: ${url}`);
         
-        // [ИСПРАВЛЕНИЕ] Добавлены заголовки против блокировок (401)
-        const response = await axios.get(url, {
-            headers: { 
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Referer': 'https://www.google.com/'
-            },
-            timeout: 15000 
-        });
+        // 1. Извлекаем контент через каскад (Jina -> Tavily)
+        const scrapedData = await scraper.extract(url);
+        
+        // Ограничиваем длину перед AI (экономия токенов)
+        const rawMarkdown = scrapedData.content.substring(0, 45000); 
+        console.log(`[PARSER] Скачано ${rawMarkdown.length} символов. Метод: ${scrapedData.method}`);
 
-        const doc = new JSDOM(response.data, { url });
-        const reader = new Readability(doc.window.document);
-        const article = reader.parse();
-
-        if (!article) throw new Error("Не удалось извлечь текст (защита или пусто).");
-
-        const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
-        turndownService.remove(['script', 'style', 'iframe', 'nav', 'footer']);
-        const rawMarkdown = turndownService.turndown(article.content);
-
-        let finalTitle = article.title;
+        // 2. Отправляем в AI на структурирование
+        let finalTitle = scrapedData.title || "WebArticle";
         let finalBody = rawMarkdown;
 
         console.log(`[PARSER] Отправляю в AI...`);
-        const aiResult = await processContentWithAI(rawMarkdown.substring(0, 30000), url);
+        const aiResult = await processContentWithAI(rawMarkdown, url);
 
         if (aiResult) {
             finalTitle = aiResult.title;
             finalBody = aiResult.body;
         }
 
+        // 3. Сохранение в Obsidian
         const date = new Date().toISOString().split('T')[0];
-        const fileName = sanitizeFilename(finalTitle || "Article");
-        const safeYamlTitle = (finalTitle || "Article").replace(/"/g, '\\"');
+        const fileName = sanitizeFilename(finalTitle);
+        const safeYamlTitle = finalTitle.replace(/"/g, '\\"');
 
         const fileContent = `---
 title: "${safeYamlTitle}"
 url: ${url}
 date: ${date}
-tags: [inbox, article]
+tags: [inbox, article, ${scrapedData.method}]
 ---
 
 ${finalBody}
@@ -114,7 +96,7 @@ ${finalBody}
 
         if (!fs.existsSync(OBSIDIAN_PATH)) fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
         fs.writeFileSync(path.join(OBSIDIAN_PATH, fileName), fileContent);
-        console.log(`[PARSER] Файл создан: ${fileName}`);
+        console.log(`[PARSER] Файл успешно создан: ${fileName}`);
 
         return finalTitle;
 

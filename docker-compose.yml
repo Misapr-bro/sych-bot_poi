@@ -1,13 +1,18 @@
 services:
-  sych-bot:
+  anna-bot:
     build: .
-    container_name: sych-bot
+    container_name: anna-bot
     user: root
     restart: unless-stopped
     # Монтируем папку data, чтобы "память" бота не стерлась при перезагрузке
     volumes:
       - ./data:/app/data
       - /root/n8n/obsidian_vault/MyVault_/Inbox:/app/obsidian_inbox
+    # 1. Пробрасываем текущую папку внутрь контейнера
+      - ./:/app
+    # 2. ВАЖНО: Изолируем папку node_modules
+    # Это чтобы модули Windows не конфликтовали с модулями Linux внутри
+      - /app/node_modules
     # Подключаем файл с секретами
     env_file:
       - .env

@@ -3,7 +3,6 @@ const storage = require('../services/storage');
 const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
-const { exec } = require('child_process');
 const parser = require('../services/parser');
 const videoVision = require('../services/video_vision');
 
@@ -21,6 +20,7 @@ function log(tag, message) {
     }
 }
 
+// [ВОССТАНОВЛЕНО] Функция истории (без нее бот падает)
 function addToHistory(chatId, role, text) {
     if (!chatHistory[chatId]) chatHistory[chatId] = [];
     chatHistory[chatId].push({ role, text });
@@ -50,7 +50,7 @@ function extractUrl(message) {
 }
 
 // ============================================================
-// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК (ПРИОРИТЕТЫ)
+// БЛОК 3: ОСНОВНОЙ ОБРАБОТЧИК (С ПРИОРИТЕТАМИ)
 // ============================================================
 
 async function processMessage(bot, msg) {
@@ -62,12 +62,12 @@ async function processMessage(bot, msg) {
     log("PROCESS", `Chat: ${chatId} | Msg: ${text.substring(0, 30)}...`);
 
     // 0. МЕНЮ ВЫБОРА МОДЕЛИ
-    if (text === "/model" || text === "⚙️ Выбор модели AI") {
+    if (text === "/model" || text === "⚙️ Выбор модели AI" || text === "⚙️ Модель") {
         const modelKeyboard = {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "⚡ Gemini 2.5 Lite (Чат/Эконом)", callback_data: "set_model:google/gemini-2.5-flash-lite-preview-02-05:free" }],
-                    [{ text: "💎 Gemini 2.5 Flash (Видео/Баланс)", callback_data: "set_model:google/gemini-2.5-flash-001" }],
+                    [{ text: "⚡ Gemini 2.5 Lite (Чат/Эконом)", callback_data: "set_model:google/gemini-2.5-flash-lite" }],
+                    [{ text: "💎 Gemini 2.5 Flash (Видео/Баланс)", callback_data: "set_model:google/gemini-2.5-flash" }],
                     [{ text: "🧠 Gemini 2.0 Pro Exp (Мозг/Психолог)", callback_data: "set_model:google/gemini-2.0-pro-exp-02-05:free" }]
                 ]
             }
@@ -88,12 +88,11 @@ async function processMessage(bot, msg) {
 
     try {
         // ============================================================
-        // ПРИОРИТЕТ №1: РУЧНОЕ СОХРАНЕНИЕ ЧЕРЕЗ РЕПЛАЙ ("В МД")
+        // [ПРИОРИТЕТ 1] РУЧНОЕ СОХРАНЕНИЕ ЧЕРЕЗ РЕПЛАЙ ("В МД")
         // ============================================================
-        // Если ты отвечаешь на сообщение командой "save", "в мд", "md"
         if (msg.reply_to_message) {
-            const triggerWords = ['в мд', 'save', 'сохрани', 'md', '/save'];
-            const isSaveCommand = triggerWords.some(w => text.toLowerCase().includes(w));
+            const triggerWords = ['мд', 'в мд', 'save', 'сохрани', 'md', '/save'];
+            const isSaveCommand = triggerWords.some(w => text.toLowerCase().trim() === w || text.toLowerCase().includes(w));
 
             if (isSaveCommand) {
                 log("MANUAL", "Принудительное сохранение через реплай...");
@@ -103,7 +102,7 @@ async function processMessage(bot, msg) {
                 const targetUrl = extractUrl(originalMsg);
                 const originalText = originalMsg.text || originalMsg.caption || "";
 
-                // А: В реплае была ссылка (Видео или Статья)
+                // А: Ссылка (Видео/Статья)
                 if (targetUrl) {
                     if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
                         const result = await videoVision.processVideo(targetUrl);
@@ -119,12 +118,9 @@ async function processMessage(bot, msg) {
                     }
                 }
 
-                // Б: В реплае был просто текст (или репост без ссылки)
+                // Б: Текст
                 if (originalText) {
-                    // Генерируем имя файла
                     const safeTitle = originalText.substring(0, 40).replace(/[^\w\sа-яё]/gi, '') + "...";
-                    
-                    // Формируем контент как заметку
                     const fileContent = `---
 date: ${new Date().toISOString().split('T')[0]}
 type: manual_note
@@ -142,9 +138,8 @@ ${originalText}`;
         }
 
         // ============================================================
-        // ПРИОРИТЕТ №2: АВТО-СОХРАНЕНИЕ РЕПОСТОВ (FORWARDS)
+        // [ПРИОРИТЕТ 2] АВТО-СОХРАНЕНИЕ РЕПОСТОВ (FORWARDS)
         // ============================================================
-        // Ловит явные пересылки (если Telegram не стер заголовки)
         if (msg.forward_date || msg.forward_from || msg.forward_from_chat) {
             log("FORWARD", "Обнаружен репост. Сохраняю...");
             startTyping();
@@ -152,7 +147,7 @@ ${originalText}`;
             const senderName = msg.forward_from_chat ? msg.forward_from_chat.title : (msg.forward_from ? msg.forward_from.first_name : "Unknown");
             const senderUsername = msg.forward_from_chat ? msg.forward_from_chat.username : (msg.forward_from ? msg.forward_from.username : null);
             
-            // Если в репосте есть ссылка на YouTube -> Vision
+            // Если репост с YouTube -> Vision
             if (foundUrl && (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be'))) {
                  const result = await videoVision.processVideo(foundUrl);
                  const savedTitle = parser.saveDirectContent(result.title, result.analysis);
@@ -161,10 +156,8 @@ ${originalText}`;
                  return;
             }
 
-            // Иначе сохраняем как текст/статью
-            const savedTitle = await parser.saveForwardedMessage(text, senderName, senderUsername, msg.chat.title, msg.message_id, chatId); // Исправлено: вызываем функцию сохранения
-            // Если saveForwardedMessage нет, используем saveDirectContent:
-            // const savedTitle = parser.saveDirectContent(`Repost_${senderName}`, text);
+            // Иначе сохраняем как текст
+            const savedTitle = parser.saveForwardedMessage(text, senderName, senderUsername, msg.chat.title, msg.message_id, chatId);
             
             stopTyping();
             await bot.sendMessage(chatId, `💾 **Репост сохранен**\n📄 \`${savedTitle}\``, getReplyOptions(msg));
@@ -172,12 +165,9 @@ ${originalText}`;
         }
 
         // ============================================================
-        // ПРИОРИТЕТ №3: АВТО-ПАРСИНГ ССЫЛОК (КЛИППЕР)
+        // [ПРИОРИТЕТ 3] КЛИППЕР (ЕСЛИ ТОЛЬКО ССЫЛКА)
         // ============================================================
-        // Если сообщение это ТОЛЬКО ссылка (без длинного комментария)
         if (foundUrl && text.length < 200) {
-            
-            // YouTube
             if (foundUrl.includes('youtube.com') || foundUrl.includes('youtu.be')) {
                 log("YOUTUBE", "Vision анализ...");
                 startTyping();
@@ -188,7 +178,6 @@ ${originalText}`;
                 return;
             }
 
-            // Статья
             startTyping();
             const title = await parser.saveArticle(foundUrl);
             stopTyping();
@@ -197,11 +186,10 @@ ${originalText}`;
         }
 
         // ============================================================
-        // ПРИОРИТЕТ №4: ЯДРО AI (ЧАТ)
+        // [ПРИОРИТЕТ 4] ЯДРО AI (ЧАТ)
         // ============================================================
-        // Сюда попадаем, только если это не реплай "в мд", не репост и не просто ссылка
         
-        // Бот-фильтр: Голосовые
+        // Обработка голосовых
         if (msg.voice || msg.audio) {
             startTyping();
             const media = msg.voice || msg.audio;
@@ -211,7 +199,6 @@ ${originalText}`;
             if (transcription && transcription.text) {
                 text = transcription.text;
                 await bot.sendMessage(chatId, "🎤 Расшифровка:\n" + text);
-                // Продолжаем выполнение, чтобы AI ответил на расшифровку
             }
         }
 
@@ -251,7 +238,6 @@ ${originalText}`;
     }
 }
 
-// Экспорт (не забудь!)
 function setupCallback(bot) {
     bot.on('callback_query', async (query) => {
         const data = query.data;

@@ -1,4 +1,8 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+// === БЛОК: ИМПОРТЫ ===
+// Почему: Подключаем prompts для получения инструкции анализа видео
+const prompts = require('../core/prompts');
+
 
 // ==========================================
 // БЛОК 1: ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКИ
@@ -48,17 +52,8 @@ async function processVideo(youtubeUrl) {
 
     console.log(`[VISION] Анализ URL (${MODEL_CONFIG.model}): ${youtubeUrl}`);
 
-    const prompt = `
-    Проанализируй это видео. 
-    
-    ШАГ 1: Напиши название файла (на русском).
-    - ТОЛЬКО текст, без markdown.
-    - Начни строку с "TITLE: ".
-    
-    ШАГ 2: Подробный технический конспект (Markdown).
-    - Источник: ${youtubeUrl}
-    - Тезисы, софт, алгоритмы.
-    `;
+    // === ИЗМЕНЕНИЕ: ИСПОЛЬЗОВАНИЕ ЦЕНТРАЛЬНОГО ПРОМПТА ===
+    const prompt = prompts.videoVision(youtubeUrl);
 
     try {
         const result = await model.generateContent([
